@@ -11,4 +11,5 @@ idf_component_register(
     INCLUDE_DIRS 
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/drivers/gpio
+        ${CMAKE_SOURCE_DIR}/drivers/adc
 )
