@@ -77,7 +77,16 @@ esp_err_t gpio_driver_set_level(gpio_num_t pin, uint32_t level)
         return ESP_ERR_INVALID_ARG;
     }
 
+    // Note: gpio_set_level() is thread-safe in ESP-IDF, but we protect for consistency
+    if (xSemaphoreTake(driver_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to take mutex");
+        return ESP_ERR_TIMEOUT;
+    }
+
     esp_err_t ret = gpio_set_level(pin, level);
+    
+    xSemaphoreGive(driver_mutex);
+
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to set GPIO %d level: %s", pin, esp_err_to_name(ret));
         return ret;
@@ -93,7 +102,17 @@ int gpio_driver_get_level(gpio_num_t pin)
         return -1;
     }
 
-    return gpio_get_level(pin);
+    // Note: gpio_get_level() is thread-safe in ESP-IDF, but we protect for consistency
+    if (xSemaphoreTake(driver_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to take mutex");
+        return -1;
+    }
+
+    int level = gpio_get_level(pin);
+    
+    xSemaphoreGive(driver_mutex);
+
+    return level;
 }
 
 esp_err_t gpio_driver_toggle(gpio_num_t pin)
@@ -103,14 +122,30 @@ esp_err_t gpio_driver_toggle(gpio_num_t pin)
         return ESP_ERR_INVALID_STATE;
     }
 
+    // Protect entire toggle operation atomically
+    if (xSemaphoreTake(driver_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to take mutex");
+        return ESP_ERR_TIMEOUT;
+    }
+
     int current_level = gpio_get_level(pin);
     if (current_level < 0) {
+        xSemaphoreGive(driver_mutex);
         ESP_LOGE(TAG, "Failed to get GPIO %d level", pin);
         return ESP_FAIL;
     }
 
     uint32_t new_level = (current_level == 0) ? 1 : 0;
-    return gpio_driver_set_level(pin, new_level);
+    esp_err_t ret = gpio_set_level(pin, new_level);
+    
+    xSemaphoreGive(driver_mutex);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to toggle GPIO %d: %s", pin, esp_err_to_name(ret));
+        return ret;
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t gpio_driver_install_isr(int intr_alloc_flags)
@@ -176,12 +211,22 @@ esp_err_t gpio_driver_deinit(void)
         return ESP_OK;
     }
 
+    // Take mutex to prevent race conditions with other operations
+    if (driver_mutex != NULL) {
+        if (xSemaphoreTake(driver_mutex, portMAX_DELAY) != pdTRUE) {
+            ESP_LOGE(TAG, "Failed to take mutex during deinit");
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+
+    driver_initialized = false;
+
+    // Delete mutex last
     if (driver_mutex != NULL) {
         vSemaphoreDelete(driver_mutex);
         driver_mutex = NULL;
     }
 
-    driver_initialized = false;
     ESP_LOGI(TAG, "GPIO driver deinitialized");
     return ESP_OK;
 }
