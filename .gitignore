@@ -1,0 +1,37 @@
+# PlatformIO
+.pio/
+.vscode/
+.idea/
+
+# Build artifacts
+*.elf
+*.bin
+*.map
+
+# ESP-IDF configuration
+sdkconfig
+sdkconfig.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environment
+.env
+.venv
+env/
+venv/
+# Note: venv/ is ignored, but you can commit it if preferred
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+*.swp
+*.swo
+*~
+
