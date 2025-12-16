@@ -14,4 +14,6 @@ idf_component_register(
         ${CMAKE_SOURCE_DIR}/drivers/adc
         ${CMAKE_SOURCE_DIR}/drivers/dac
         ${CMAKE_SOURCE_DIR}/drivers/i2c
+        ${CMAKE_SOURCE_DIR}/drivers/spi/master
+        ${CMAKE_SOURCE_DIR}/drivers/spi/slave
 )
