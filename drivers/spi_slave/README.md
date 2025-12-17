@@ -1,103 +1,16 @@
-# SPI Drivers
+# SPI Slave Driver
 
-ESP32 SPI (Serial Peripheral Interface) drivers for smart home firmware.
+ESP32 SPI Slave mode driver for smart home firmware.
 
-## Structure
+## Features
 
-```
-drivers/spi/
-├── master/
-│   ├── spi_master_driver.h    # Master mode API
-│   └── spi_master_driver.c    # Master mode implementation
-├── slave/
-│   ├── spi_slave_driver.h     # Slave mode API
-│   └── spi_slave_driver.c     # Slave mode implementation
-└── README.md
-```
-
-## Master Mode
-
-See `master/spi_master_driver.h` for API documentation.
-
-### Features
-- Thread-safe SPI operations
-- SPI bus configuration
-- Multiple device support per bus (up to 8 per host)
-- Transmit/receive operations with timeout
-- Full-duplex transactions
-- Device handle caching
-- Per-device clock speed and mode configuration
-- Clock speed validation (1 kHz - 80 MHz)
-
-### Usage
-
-```c
-#include "spi_master_driver.h"
-
-void app_main(void)
-{
-    // Initialize SPI master driver
-    spi_master_driver_init();
-
-    // Configure SPI bus
-    spi_master_bus_config_t bus_config = {
-        .host_id = SPI2_HOST,
-        .mosi_io_num = GPIO_NUM_13,
-        .miso_io_num = GPIO_NUM_12,
-        .sclk_io_num = GPIO_NUM_14,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .dma_chan = SPI_DMA_CH_AUTO,
-        .max_transfer_sz = 4096,
-        .queue_size = 1
-    };
-    spi_master_driver_config_bus(&bus_config);
-
-    // Add SPI device
-    spi_master_device_config_t device_config = {
-        .host_id = SPI2_HOST,
-        .cs_io_num = GPIO_NUM_15,
-        .clock_speed_hz = 5000000,  // 5 MHz
-        .mode = 0,
-        .cs_ena_pretrans = 0,
-        .cs_ena_posttrans = 0,
-        .input_delay_ns = 0,
-        .flags = 0,
-        .queue_size = 1
-    };
-    spi_master_driver_add_device(&device_config);
-
-    // Transmit data
-    uint8_t tx_data[] = {0x01, 0x02, 0x03};
-    spi_master_driver_transmit(SPI2_HOST, GPIO_NUM_15, tx_data, sizeof(tx_data), 100);
-
-    // Receive data
-    uint8_t rx_data[4];
-    spi_master_driver_receive(SPI2_HOST, GPIO_NUM_15, rx_data, sizeof(rx_data), 100);
-
-    // Full-duplex transaction
-    uint8_t tx_buf[] = {0xAA, 0xBB, 0xCC};
-    uint8_t rx_buf[3];
-    spi_master_driver_transmit_receive(SPI2_HOST, GPIO_NUM_15, tx_buf, rx_buf, sizeof(tx_buf), 100);
-
-    // Cleanup
-    spi_master_driver_remove_device(SPI2_HOST, GPIO_NUM_15);
-    spi_master_driver_deinit();
-}
-```
-
-## Slave Mode
-
-See `slave/spi_slave_driver.h` for API documentation.
-
-### Features
 - Respond to master-initiated transactions
 - Queue-based transaction handling
 - Optional callbacks for setup and post-transaction events
 - Full-duplex slave transactions
 - DMA support for large transfers
 
-### Usage
+## Usage
 
 ```c
 #include "spi_slave_driver.h"
@@ -153,7 +66,7 @@ void app_main(void)
 }
 ```
 
-### Asynchronous Slave Transactions
+## Asynchronous Slave Transactions
 
 ```c
 // Queue multiple transactions
@@ -189,16 +102,6 @@ Default SPI pins for ESP32:
 - **SPI2_HOST (HSPI)**: MOSI=GPIO13, MISO=GPIO12, SCLK=GPIO14
 - **SPI3_HOST (VSPI)**: MOSI=GPIO23, MISO=GPIO19, SCLK=GPIO18
 
-## Clock Speeds (Master Mode)
-
-Common SPI clock speeds:
-- `1000000` - 1 MHz (slow, reliable)
-- `5000000` - 5 MHz (medium)
-- `10000000` - 10 MHz (fast)
-- `20000000` - 20 MHz (very fast)
-- `40000000` - 40 MHz (SPI2 max)
-- `80000000` - 80 MHz (SPI3 max, short traces only)
-
 **Note**: Slave mode clock is determined by the master.
 
 ## DMA
@@ -208,24 +111,15 @@ Common SPI clock speeds:
 - `1` or `2` - Specific DMA channel
 
 ### DMA Requirements
+
 - Buffers must be in DRAM (not flash)
 - 4-byte alignment recommended (use `WORD_ALIGNED_ATTR`)
 - Buffer sizes should be multiples of 4 bytes
 
 ## API Reference
 
-### Master Functions
-- `spi_master_driver_init()` - Initialize master driver
-- `spi_master_driver_config_bus()` - Configure SPI bus
-- `spi_master_driver_add_device()` - Add device to bus
-- `spi_master_driver_remove_device()` - Remove device
-- `spi_master_driver_transmit()` - Transmit data
-- `spi_master_driver_receive()` - Receive data
-- `spi_master_driver_transmit_receive()` - Full-duplex transfer
-- `spi_master_driver_is_bus_configured()` - Check bus status
-- `spi_master_driver_deinit()` - Deinitialize master driver
-
 ### Slave Functions
+
 - `spi_slave_driver_init()` - Initialize slave driver
 - `spi_slave_driver_config()` - Configure slave
 - `spi_slave_driver_free()` - Free slave on host
@@ -234,3 +128,4 @@ Common SPI clock speeds:
 - `spi_slave_driver_transmit_receive()` - Blocking transaction
 - `spi_slave_driver_is_configured()` - Check slave status
 - `spi_slave_driver_deinit()` - Deinitialize slave driver
+
