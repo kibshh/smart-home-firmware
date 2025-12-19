@@ -14,5 +14,6 @@ idf_component_register(
         spi_master
         spi_slave
         timer
+        pwm
         uart
 )
