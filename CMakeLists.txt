@@ -10,6 +10,7 @@ set(EXTRA_COMPONENT_DIRS
     "${CMAKE_SOURCE_DIR}/drivers/i2c"
     "${CMAKE_SOURCE_DIR}/drivers/spi_master"
     "${CMAKE_SOURCE_DIR}/drivers/spi_slave"
+    "${CMAKE_SOURCE_DIR}/drivers/timer"
     "${CMAKE_SOURCE_DIR}/drivers/uart"
     "${CMAKE_SOURCE_DIR}/src"
 )

@@ -13,5 +13,6 @@ idf_component_register(
         i2c
         spi_master
         spi_slave
+        timer
         uart
 )
