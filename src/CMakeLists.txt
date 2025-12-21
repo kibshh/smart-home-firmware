@@ -16,4 +16,5 @@ idf_component_register(
         timer
         pwm
         uart
+        rmt
 )
