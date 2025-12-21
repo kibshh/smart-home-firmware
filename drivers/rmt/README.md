@@ -6,6 +6,7 @@ ESP32 RMT (Remote Control Transceiver) driver abstraction layer for smart home f
 
 - **Thread-safe operations** with per-channel mutex protection
 - **Multi-instance support** with context-aware APIs
+- **Channel allocation protection** prevents multiple contexts from using the same RMT channel
 - **Pre-allocated buffers** (no dynamic allocation during operation)
 - **Configurable queue depths** for TX and RX operations
 - **Carrier modulation** support for IR transmission
@@ -35,6 +36,17 @@ The driver supports both global and multi-instance usage:
 - Automatic cleanup of encoders, carriers, filters, and event queues
 - Hardened deinit that forces deletion of all active channels
 - Proper mutex cleanup in all scenarios
+
+### Channel Allocation Protection
+
+The driver implements global channel allocation tracking to prevent conflicts between multiple contexts:
+
+- **Global tracking**: Each RMT channel (TX and RX) can only be allocated to one context at a time
+- **Automatic checks**: Before allocating a channel, the driver verifies it's not already in use by another context
+- **Error handling**: Returns `ESP_ERR_INVALID_STATE` if attempting to use a channel already allocated to another context
+- **Automatic release**: Channel allocations are automatically released when channels are deleted or contexts are deinitialized
+
+This ensures that multiple driver instances cannot accidentally conflict by trying to use the same hardware RMT channel simultaneously.
 
 ## Usage Examples
 
@@ -77,7 +89,7 @@ void app_main(void)
 
     // Cleanup
     rmt_driver_delete_tx(NULL, tx_handle);
-    rmt_driver_deinit();
+    rmt_driver_deinit_global();
 }
 ```
 
@@ -120,7 +132,7 @@ void app_main(void)
 
     // Cleanup
     rmt_driver_delete_rx(NULL, rx_handle);
-    rmt_driver_deinit();
+    rmt_driver_deinit_global();
 }
 ```
 
@@ -139,6 +151,7 @@ void app_main(void)
     rmt_driver_init(&ctx2);
 
     // Configure channels in different instances
+    // Note: Each context must use different channel numbers to avoid conflicts
     rmt_channel_handle_t tx1, tx2;
     rmt_driver_tx_config_t config = {
         .gpio_num = GPIO_NUM_4,
@@ -148,8 +161,14 @@ void app_main(void)
         .trans_queue_depth = 4,
     };
     
+    // Context 1 uses channel 0
     rmt_driver_config_tx(ctx1, 0, &config, &tx1);
-    rmt_driver_config_tx(ctx2, 0, &config, &tx2);
+    
+    // Context 2 uses channel 1 (different channel to avoid conflict)
+    rmt_driver_config_tx(ctx2, 1, &config, &tx2);
+    
+    // If ctx2 tried to use channel 0, it would fail with ESP_ERR_INVALID_STATE:
+    // rmt_driver_config_tx(ctx2, 0, &config, &tx2);  // ❌ Error: channel already allocated
 
     // Use instances independently
     rmt_symbol_t symbols[] = {{1, 1000, 0, 500}};
@@ -315,15 +334,17 @@ rmt_symbol_t nec_logic1 = {
 
 - `rmt_driver_delete_tx(context, tx_handle)`: Delete TX channel
 - `rmt_driver_delete_rx(context, rx_handle)`: Delete RX channel
-- `rmt_driver_deinit()`: Deinitialize global instance
+- `rmt_driver_deinit_global()`: Deinitialize global instance
 - `rmt_driver_deinit_context(context)`: Deinitialize specific context (NULL for global)
 
 ## Thread Safety
 
 - **Per-channel mutexes**: Each channel has its own mutex protecting buffer access
 - **Driver-wide mutex**: Protects driver state (channel counts, mappings)
+- **Allocation mutex**: Protects global channel allocation tracking
 - **ESP-IDF thread safety**: RMT API operations are thread-safe
 - **Buffer protection**: TX and RX buffers are protected from concurrent access
+- **Channel allocation protection**: Prevents multiple contexts from using the same RMT channel
 
 ## Resource Management
 
@@ -336,7 +357,7 @@ rmt_symbol_t nec_logic1 = {
 
 ### Hardened Deinit
 
-`rmt_driver_deinit()` performs complete cleanup:
+`rmt_driver_deinit_global()` performs complete cleanup:
 
 - Waits for all ongoing transmissions to complete
 - Removes all carriers
@@ -358,7 +379,7 @@ rmt_symbol_t nec_logic1 = {
 All functions return `esp_err_t`:
 
 - `ESP_OK`: Success
-- `ESP_ERR_INVALID_STATE`: Driver not initialized
+- `ESP_ERR_INVALID_STATE`: Driver not initialized, or channel already allocated by another context
 - `ESP_ERR_INVALID_ARG`: Invalid parameters
 - `ESP_ERR_NO_MEM`: Memory allocation failure
 - `ESP_ERR_TIMEOUT`: Operation timeout
@@ -385,6 +406,8 @@ Error logging uses ESP-IDF logging levels:
 4. **Clean up resources**: Always delete channels and deinit when done
 5. **Handle timeouts**: Check return values and handle `ESP_ERR_TIMEOUT`
 6. **Multi-instance isolation**: Use separate contexts for independent driver instances
+7. **Avoid channel conflicts**: Each context should use different channel numbers to prevent allocation conflicts
+8. **Check allocation errors**: Handle `ESP_ERR_INVALID_STATE` when channel is already allocated by another context
 
 ## Troubleshooting
 
@@ -407,6 +430,13 @@ Error logging uses ESP-IDF logging levels:
 - Always delete channels before deinit
 - Check that all mutexes are properly released
 - Verify event queues are deleted
+
+### Channel Allocation Conflicts
+
+- **Error**: `ESP_ERR_INVALID_STATE` when configuring a channel
+- **Cause**: Channel is already allocated by another context
+- **Solution**: Use a different channel number, or delete the channel from the other context first
+- **Example**: If context 1 uses channel 0, context 2 must use channel 1-7
 
 ## License
 

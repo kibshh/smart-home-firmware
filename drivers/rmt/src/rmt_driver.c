@@ -68,68 +68,178 @@ struct rmt_driver_context {
 // Global driver instance (for backward compatibility)
 static rmt_driver_context_t *global_context = NULL;
 
+// Global channel allocation tracking to prevent collisions between contexts
+// Maps channel number -> context pointer (NULL = free)
+static rmt_driver_context_t *channel_allocations_tx[RMT_CHANNEL_MAX] = {NULL};
+static rmt_driver_context_t *channel_allocations_rx[RMT_CHANNEL_MAX] = {NULL};
+static SemaphoreHandle_t allocation_mutex = NULL;
+
+// Initialize allocation mutex (called once)
+static esp_err_t init_allocation_mutex(void)
+{
+    if (allocation_mutex == NULL) {
+        allocation_mutex = xSemaphoreCreateMutex();
+        if (allocation_mutex == NULL) {
+            ESP_LOGE(TAG, "Failed to create allocation mutex");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    return ESP_OK;
+}
+
 // Helper to get context (returns global if NULL passed)
 static inline rmt_driver_context_t *get_context(rmt_driver_context_t *ctx)
 {
     return (ctx != NULL) ? ctx : global_context;
 }
 
+// Check if channel is available for allocation
+static esp_err_t check_channel_available_tx(uint32_t channel, rmt_driver_context_t *ctx)
+{
+    if (allocation_mutex == NULL) {
+        esp_err_t ret = init_allocation_mutex();
+        if (ret != ESP_OK) {
+            return ret;
+        }
+    }
+
+    if (xSemaphoreTake(allocation_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (channel_allocations_tx[channel] != NULL && channel_allocations_tx[channel] != ctx) {
+        xSemaphoreGive(allocation_mutex);
+        ESP_LOGE(TAG, "RMT TX channel %lu already allocated by another context", (unsigned long)channel);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreGive(allocation_mutex);
+    return ESP_OK;
+}
+
+// Allocate TX channel to context
+static esp_err_t allocate_channel_tx(uint32_t channel, rmt_driver_context_t *ctx)
+{
+    if (xSemaphoreTake(allocation_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    channel_allocations_tx[channel] = ctx;
+    xSemaphoreGive(allocation_mutex);
+    return ESP_OK;
+}
+
+// Release TX channel allocation
+static void release_channel_tx(uint32_t channel)
+{
+    if (allocation_mutex != NULL) {
+        if (xSemaphoreTake(allocation_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            channel_allocations_tx[channel] = NULL;
+            xSemaphoreGive(allocation_mutex);
+        }
+    }
+}
+
+// Check if channel is available for allocation
+static esp_err_t check_channel_available_rx(uint32_t channel, rmt_driver_context_t *ctx)
+{
+    if (allocation_mutex == NULL) {
+        esp_err_t ret = init_allocation_mutex();
+        if (ret != ESP_OK) {
+            return ret;
+        }
+    }
+
+    if (xSemaphoreTake(allocation_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (channel_allocations_rx[channel] != NULL && channel_allocations_rx[channel] != ctx) {
+        xSemaphoreGive(allocation_mutex);
+        ESP_LOGE(TAG, "RMT RX channel %lu already allocated by another context", (unsigned long)channel);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreGive(allocation_mutex);
+    return ESP_OK;
+}
+
+// Allocate RX channel to context
+static esp_err_t allocate_channel_rx(uint32_t channel, rmt_driver_context_t *ctx)
+{
+    if (xSemaphoreTake(allocation_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    channel_allocations_rx[channel] = ctx;
+    xSemaphoreGive(allocation_mutex);
+    return ESP_OK;
+}
+
+// Release RX channel allocation
+static void release_channel_rx(uint32_t channel)
+{
+    if (allocation_mutex != NULL) {
+        if (xSemaphoreTake(allocation_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            channel_allocations_rx[channel] = NULL;
+            xSemaphoreGive(allocation_mutex);
+        }
+    }
+}
+
 esp_err_t rmt_driver_init(rmt_driver_context_t **context)
 {
-    rmt_driver_context_t *ctx = NULL;
-    
+    // If caller passes an already-initialized context, reject it
     if (context != NULL && *context != NULL) {
-        // Use provided context
-        ctx = *context;
-    } else {
-        // Allocate new context
-        ctx = calloc(1, sizeof(rmt_driver_context_t));
-        if (ctx == NULL) {
-            ESP_LOGE(TAG, "Failed to allocate driver context");
-            return ESP_ERR_NO_MEM;
+        rmt_driver_context_t *existing = *context;
+        if (existing->initialized) {
+            ESP_LOGE(TAG, "Context already initialized");
+            return ESP_ERR_INVALID_STATE;
         }
-        
-        // Create mutex
-        ctx->mutex = xSemaphoreCreateMutex();
-        if (ctx->mutex == NULL) {
-            ESP_LOGE(TAG, "Failed to create mutex");
+    }
+    
+    // Allocate new context
+    rmt_driver_context_t *ctx = calloc(1, sizeof(rmt_driver_context_t));
+    if (ctx == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate driver context");
+        return ESP_ERR_NO_MEM;
+    }
+    
+    // Create mutex
+    ctx->mutex = xSemaphoreCreateMutex();
+    if (ctx->mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create mutex");
+        free(ctx);
+        return ESP_ERR_NO_MEM;
+    }
+    
+    // Initialize arrays (calloc already zeros memory, but be explicit for handle maps)
+    for (int i = 0; i < RMT_CHANNEL_MAX; i++) {
+        ctx->tx_handle_map[i].handle = NULL;
+        ctx->tx_handle_map[i].channel = RMT_CHANNEL_MAX;
+        ctx->rx_handle_map[i].handle = NULL;
+        ctx->rx_handle_map[i].channel = RMT_CHANNEL_MAX;
+        // Create per-channel mutex for buffer thread safety
+        ctx->channel_mutexes[i] = xSemaphoreCreateMutex();
+        if (ctx->channel_mutexes[i] == NULL) {
+            ESP_LOGE(TAG, "Failed to create channel mutex %d", i);
+            // Cleanup already created mutexes
+            for (int j = 0; j < i; j++) {
+                vSemaphoreDelete(ctx->channel_mutexes[j]);
+            }
+            vSemaphoreDelete(ctx->mutex);
             free(ctx);
             return ESP_ERR_NO_MEM;
         }
-        
-        // Initialize arrays
-        memset(ctx->tx_encoders, 0, sizeof(ctx->tx_encoders));
-        memset(ctx->rx_event_queues, 0, sizeof(ctx->rx_event_queues));
-        memset(ctx->carrier_applied, 0, sizeof(ctx->carrier_applied));
-        memset(ctx->rx_filter_configs, 0, sizeof(ctx->rx_filter_configs));
-        memset(ctx->channel_configs, 0, sizeof(ctx->channel_configs));
-        for (int i = 0; i < RMT_CHANNEL_MAX; i++) {
-            ctx->tx_handle_map[i].handle = NULL;
-            ctx->tx_handle_map[i].channel = RMT_CHANNEL_MAX;
-            ctx->rx_handle_map[i].handle = NULL;
-            ctx->rx_handle_map[i].channel = RMT_CHANNEL_MAX;
-            // Create per-channel mutex for buffer thread safety
-            ctx->channel_mutexes[i] = xSemaphoreCreateMutex();
-            if (ctx->channel_mutexes[i] == NULL) {
-                ESP_LOGE(TAG, "Failed to create channel mutex %d", i);
-                // Cleanup already created mutexes
-                for (int j = 0; j < i; j++) {
-                    vSemaphoreDelete(ctx->channel_mutexes[j]);
-                }
-                vSemaphoreDelete(ctx->mutex);
-                free(ctx);
-                return ESP_ERR_NO_MEM;
-            }
-        }
-        
-        ctx->initialized = true;
-        
-        if (context != NULL) {
-            *context = ctx;
-        } else {
-            // Store as global context
-            global_context = ctx;
-        }
+    }
+    
+    ctx->initialized = true;
+    
+    if (context != NULL) {
+        *context = ctx;
+    } else {
+        // Store as global context
+        global_context = ctx;
     }
 
     ESP_LOGI(TAG, "RMT driver initialized (context=%p)", (void*)ctx);
@@ -159,6 +269,12 @@ esp_err_t rmt_driver_config_tx(rmt_driver_context_t *context, uint32_t channel, 
         return ESP_ERR_INVALID_ARG;
     }
 
+    // Check if channel is available (not allocated by another context)
+    esp_err_t ret = check_channel_available_tx(channel, ctx);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
     // Configure RMT TX channel
     rmt_tx_channel_config_t tx_channel_cfg = {
         .gpio_num = config->gpio_num,
@@ -172,9 +288,17 @@ esp_err_t rmt_driver_config_tx(rmt_driver_context_t *context, uint32_t channel, 
         },
     };
 
-    esp_err_t ret = rmt_new_tx_channel(&tx_channel_cfg, tx_handle);
+    ret = rmt_new_tx_channel(&tx_channel_cfg, tx_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create RMT TX channel %lu: %s", (unsigned long)channel, esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Allocate channel to this context
+    ret = allocate_channel_tx(channel, ctx);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to allocate TX channel %lu", (unsigned long)channel);
+        rmt_del_channel(*tx_handle);
         return ret;
     }
 
@@ -192,6 +316,7 @@ esp_err_t rmt_driver_config_tx(rmt_driver_context_t *context, uint32_t channel, 
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to apply carrier to TX channel %lu: %s", (unsigned long)channel, esp_err_to_name(ret));
             rmt_del_channel(*tx_handle);
+            release_channel_tx(channel);  // Release allocation on error
             return ret;
         }
         
@@ -204,13 +329,15 @@ esp_err_t rmt_driver_config_tx(rmt_driver_context_t *context, uint32_t channel, 
 
     // Create encoder (simple copy encoder for pattern-based transmission)
     // Store encoder handle for reuse in transmit calls
-    // Note: rmt_copy_encoder_config_t is an empty struct (no fields), so zero-initialization is correct
-    rmt_copy_encoder_config_t copy_encoder_config = {0};
+    // Note: rmt_copy_encoder_config_t is an empty struct (no fields) in ESP-IDF
+    rmt_copy_encoder_config_t copy_encoder_config;
+    memset(&copy_encoder_config, 0, sizeof(copy_encoder_config));
     rmt_encoder_handle_t copy_encoder = NULL;
     ret = rmt_new_copy_encoder(&copy_encoder_config, &copy_encoder);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create copy encoder for TX channel %lu: %s", (unsigned long)channel, esp_err_to_name(ret));
         rmt_del_channel(*tx_handle);
+        release_channel_tx(channel);  // Release allocation on error
         return ret;
     }
 
@@ -236,6 +363,7 @@ esp_err_t rmt_driver_config_tx(rmt_driver_context_t *context, uint32_t channel, 
         }
         rmt_del_encoder(copy_encoder);
         rmt_del_channel(*tx_handle);
+        release_channel_tx(channel);  // Release allocation on error
         return ret;
     }
 
@@ -269,6 +397,12 @@ esp_err_t rmt_driver_config_rx(rmt_driver_context_t *context, uint32_t channel, 
         return ESP_ERR_INVALID_ARG;
     }
 
+    // Check if channel is available (not allocated by another context)
+    esp_err_t ret = check_channel_available_rx(channel, ctx);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
     // Create event queue for RX completion events (use configurable depth)
     uint32_t queue_depth = (config->event_queue_depth > 0) ? config->event_queue_depth : 4;
     QueueHandle_t event_queue = xQueueCreate(queue_depth, sizeof(rmt_rx_done_event_data_t));
@@ -289,10 +423,19 @@ esp_err_t rmt_driver_config_rx(rmt_driver_context_t *context, uint32_t channel, 
         },
     };
 
-    esp_err_t ret = rmt_new_rx_channel(&rx_channel_cfg, rx_handle);
+    ret = rmt_new_rx_channel(&rx_channel_cfg, rx_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create RMT RX channel %lu: %s", (unsigned long)channel, esp_err_to_name(ret));
         vQueueDelete(event_queue);
+        return ret;
+    }
+
+    // Allocate channel to this context
+    ret = allocate_channel_rx(channel, ctx);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to allocate RX channel %lu", (unsigned long)channel);
+        vQueueDelete(event_queue);
+        rmt_del_channel(*rx_handle);
         return ret;
     }
 
@@ -306,14 +449,18 @@ esp_err_t rmt_driver_config_rx(rmt_driver_context_t *context, uint32_t channel, 
         ESP_LOGE(TAG, "Failed to register RX event callbacks for channel %lu: %s", (unsigned long)channel, esp_err_to_name(ret));
         vQueueDelete(event_queue);
         rmt_del_channel(*rx_handle);
+        release_channel_rx(channel);  // Release allocation on error
         return ret;
     }
 
-    // Filter configuration will be applied during rmt_receive() call
-    // Store filter settings for later use (we'll apply them in receive function)
-    (void)config->filter_en;
-    (void)config->filter_ticks;
-    (void)config->threshold;
+    // Store filter settings for later use in receive function
+    if (xSemaphoreTake(ctx->mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        ctx->rx_filter_configs[channel].filter_en = config->filter_en;
+        ctx->rx_filter_configs[channel].filter_ticks = config->filter_ticks;
+        ctx->rx_filter_configs[channel].threshold = config->threshold;
+        ctx->channel_configs[channel].resolution_hz = config->resolution_hz;
+        xSemaphoreGive(ctx->mutex);
+    }
 
     // Enable channel
     ret = rmt_enable(*rx_handle);
@@ -321,6 +468,7 @@ esp_err_t rmt_driver_config_rx(rmt_driver_context_t *context, uint32_t channel, 
         ESP_LOGE(TAG, "Failed to enable RX channel %lu: %s", (unsigned long)channel, esp_err_to_name(ret));
         vQueueDelete(event_queue);
         rmt_del_channel(*rx_handle);
+        release_channel_rx(channel);  // Release allocation on error
         return ret;
     }
 
@@ -411,7 +559,7 @@ esp_err_t rmt_driver_transmit(rmt_driver_context_t *context, rmt_channel_handle_
     esp_err_t ret = rmt_transmit(tx_handle, copy_encoder, rmt_symbols, num_symbols * sizeof(rmt_symbol_word_t), &tx_config);
     
     // Unlock channel buffer (transmission is queued, buffer can be reused after transmission completes)
-    // Note: In a production system, you might want to keep the lock until transmission completes
+    // Note: Later, it might me good to keep the lock until transmission completes
     // For now, we unlock immediately since ESP-IDF copies the data
     xSemaphoreGive(channel_mutex);
     
@@ -464,14 +612,23 @@ esp_err_t rmt_driver_receive(rmt_driver_context_t *context, rmt_channel_handle_t
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Find event queue and channel number for this channel
+    // Find event queue, channel number, and filter config for this channel
+    // Get everything we need from ctx while holding ctx->mutex (prevents deadlock with channel_mutex)
     QueueHandle_t event_queue = NULL;
     uint32_t channel = RMT_CHANNEL_MAX;
+    rmt_rx_filter_config_t filter_cfg = {0};
+    uint32_t resolution_hz = 1000000;  // Default fallback
+    
     if (xSemaphoreTake(ctx->mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         for (int i = 0; i < RMT_CHANNEL_MAX; i++) {
             if (ctx->rx_handle_map[i].handle == rx_handle) {
                 event_queue = ctx->rx_event_queues[i];
                 channel = i;
+                filter_cfg = ctx->rx_filter_configs[i];
+                resolution_hz = ctx->channel_configs[i].resolution_hz;
+                if (resolution_hz == 0) {
+                    resolution_hz = 1000000;  // Fallback if not set
+                }
                 break;
             }
         }
@@ -492,23 +649,6 @@ esp_err_t rmt_driver_receive(rmt_driver_context_t *context, rmt_channel_handle_t
 
     // Use pre-allocated buffer for this channel
     rmt_symbol_word_t *rmt_symbols = ctx->rx_buffers[channel];
-
-    // Get filter configuration and resolution for this channel
-    rmt_rx_filter_config_t filter_cfg;
-    uint32_t resolution_hz = 1000000;  // Default fallback
-    if (xSemaphoreTake(ctx->mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        filter_cfg = ctx->rx_filter_configs[channel];
-        resolution_hz = ctx->channel_configs[channel].resolution_hz;
-        if (resolution_hz == 0) {
-            resolution_hz = 1000000;  // Fallback if not set
-        }
-        xSemaphoreGive(ctx->mutex);
-    } else {
-        // Default if mutex fails
-        filter_cfg.filter_en = false;
-        filter_cfg.filter_ticks = 0;
-        filter_cfg.threshold = 0;
-    }
 
     // Configure receive with filter settings
     rmt_receive_config_t receive_config = {
@@ -638,6 +778,7 @@ esp_err_t rmt_driver_delete_tx(rmt_driver_context_t *context, rmt_channel_handle
     // Find and delete encoder for this channel
     rmt_encoder_handle_t encoder_to_delete = NULL;
     uint32_t channel = RMT_CHANNEL_MAX;
+    bool had_carrier = false;
     
     if (xSemaphoreTake(ctx->mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         // Find encoder associated with this handle
@@ -645,6 +786,7 @@ esp_err_t rmt_driver_delete_tx(rmt_driver_context_t *context, rmt_channel_handle
             if (ctx->tx_handle_map[i].handle == tx_handle) {
                 encoder_to_delete = ctx->tx_encoders[i];
                 channel = i;
+                had_carrier = ctx->carrier_applied[i];  // Save carrier status before clearing
                 ctx->tx_encoders[i] = NULL;  // Clear encoder reference
                 ctx->tx_handle_map[i].handle = NULL;  // Clear handle mapping
                 ctx->tx_handle_map[i].channel = RMT_CHANNEL_MAX;
@@ -653,6 +795,22 @@ esp_err_t rmt_driver_delete_tx(rmt_driver_context_t *context, rmt_channel_handle
             }
         }
         xSemaphoreGive(ctx->mutex);
+    }
+
+    // Explicitly remove carrier if it was applied (must do before deleting channel)
+    if (channel < RMT_CHANNEL_MAX && had_carrier) {
+        // Disable carrier by applying empty carrier config
+        rmt_carrier_config_t carrier_cfg = {
+            .duty_cycle = 0.0f,
+            .frequency_hz = 0,
+            .flags = {
+                .polarity_active_low = false,
+            },
+        };
+        esp_err_t carrier_ret = rmt_apply_carrier(tx_handle, &carrier_cfg);
+        if (carrier_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Warning: Failed to remove carrier: %s", esp_err_to_name(carrier_ret));
+        }
     }
 
     // Delete encoder if found
@@ -667,22 +825,6 @@ esp_err_t rmt_driver_delete_tx(rmt_driver_context_t *context, rmt_channel_handle
     if (channel < RMT_CHANNEL_MAX && ctx->channel_mutexes[channel] != NULL) {
         vSemaphoreDelete(ctx->channel_mutexes[channel]);
         ctx->channel_mutexes[channel] = NULL;
-    }
-
-    // Explicitly remove carrier if it was applied
-    if (channel < RMT_CHANNEL_MAX && ctx->carrier_applied[channel]) {
-        // Disable carrier by applying empty carrier config
-        rmt_carrier_config_t carrier_cfg = {
-            .duty_cycle = 0.0f,
-            .frequency_hz = 0,
-            .flags = {
-                .polarity_active_low = false,
-            },
-        };
-        esp_err_t carrier_ret = rmt_apply_carrier(tx_handle, &carrier_cfg);
-        if (carrier_ret != ESP_OK) {
-            ESP_LOGW(TAG, "Warning: Failed to remove carrier: %s", esp_err_to_name(carrier_ret));
-        }
     }
 
     // Disable channel before deletion (ensures clean state)
@@ -702,6 +844,9 @@ esp_err_t rmt_driver_delete_tx(rmt_driver_context_t *context, rmt_channel_handle
         }
         xSemaphoreGive(ctx->mutex);
     }
+
+    // Release channel allocation
+    release_channel_tx(channel);
 
     ESP_LOGD(TAG, "RMT TX channel deleted");
     return ESP_OK;
@@ -723,28 +868,18 @@ esp_err_t rmt_driver_delete_rx(rmt_driver_context_t *context, rmt_channel_handle
     // Disable channel before deletion (ensures clean state)
     rmt_disable(rx_handle);
 
-    // Find and delete event queue for this channel
+    // Find channel number, event queue, and cleanup
     QueueHandle_t event_queue_to_delete = NULL;
+    uint32_t channel = RMT_CHANNEL_MAX;
     
     if (xSemaphoreTake(ctx->mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         for (int i = 0; i < RMT_CHANNEL_MAX; i++) {
             if (ctx->rx_handle_map[i].handle == rx_handle) {
+                channel = i;
                 event_queue_to_delete = ctx->rx_event_queues[i];
                 ctx->rx_event_queues[i] = NULL;
                 ctx->rx_handle_map[i].handle = NULL;
                 ctx->rx_handle_map[i].channel = RMT_CHANNEL_MAX;
-                break;
-            }
-        }
-        xSemaphoreGive(ctx->mutex);
-    }
-
-    // Find channel number for cleanup
-    uint32_t channel = RMT_CHANNEL_MAX;
-    if (xSemaphoreTake(ctx->mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        for (int i = 0; i < RMT_CHANNEL_MAX; i++) {
-            if (ctx->rx_handle_map[i].handle == rx_handle) {
-                channel = i;
                 break;
             }
         }
@@ -776,6 +911,9 @@ esp_err_t rmt_driver_delete_rx(rmt_driver_context_t *context, rmt_channel_handle
         }
         xSemaphoreGive(ctx->mutex);
     }
+
+    // Release channel allocation
+    release_channel_rx(channel);
 
     ESP_LOGD(TAG, "RMT RX channel deleted");
     return ESP_OK;
@@ -844,6 +982,9 @@ esp_err_t rmt_driver_deinit_context(rmt_driver_context_t *context)
             ctx->tx_handle_map[i].handle = NULL;
             ctx->tx_handle_map[i].channel = RMT_CHANNEL_MAX;
             ctx->carrier_applied[i] = false;
+            
+            // Release channel allocation
+            release_channel_tx(i);
         }
     }
     
@@ -870,6 +1011,9 @@ esp_err_t rmt_driver_deinit_context(rmt_driver_context_t *context)
             
             ctx->rx_handle_map[i].handle = NULL;
             ctx->rx_handle_map[i].channel = RMT_CHANNEL_MAX;
+            
+            // Release channel allocation
+            release_channel_rx(i);
         }
     }
 
@@ -891,11 +1035,15 @@ esp_err_t rmt_driver_deinit_context(rmt_driver_context_t *context)
         }
     }
 
-    // Free context
+    // Free context (global_context was already set to NULL at the top if this was the global context)
     free(ctx);
-    global_context = NULL;
 
     ESP_LOGI(TAG, "RMT driver deinitialized");
     return ESP_OK;
+}
+
+esp_err_t rmt_driver_deinit_global(void)
+{
+    return rmt_driver_deinit_context(NULL);
 }
 

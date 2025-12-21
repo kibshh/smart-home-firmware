@@ -183,7 +183,7 @@ esp_err_t rmt_driver_delete_rx(rmt_driver_context_t *context, rmt_channel_handle
  * 
  * @return esp_err_t ESP_OK on success
  */
-esp_err_t rmt_driver_deinit(void);
+esp_err_t rmt_driver_deinit_global(void);
 
 /**
  * @brief Deinitialize RMT driver context
