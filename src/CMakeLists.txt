@@ -17,4 +17,5 @@ idf_component_register(
         pwm
         uart
         rmt
+        pcnt
 )

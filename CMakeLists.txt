@@ -14,6 +14,7 @@ set(EXTRA_COMPONENT_DIRS
     "${CMAKE_SOURCE_DIR}/drivers/pwm"
     "${CMAKE_SOURCE_DIR}/drivers/uart"
     "${CMAKE_SOURCE_DIR}/drivers/rmt"
+    "${CMAKE_SOURCE_DIR}/drivers/pcnt"
     "${CMAKE_SOURCE_DIR}/src"
 )
 
