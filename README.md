@@ -1,3 +1,7 @@
+# ⚠️ DEPRECATED
+
+This repository is no longer maintained.
+
 # Smart Home Firmware
 
 ESP32-WROOM firmware for smart home applications using PlatformIO with ESP-IDF framework.
